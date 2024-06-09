@@ -10,10 +10,12 @@
 #include <arpa/inet.h>
 
 #define SERVER_MESSAGE_SIZE 512
+#define NICKNAME_SIZE 64
 
 typedef struct _Client_ {
     int fd;
     struct sockaddr_in addr;
+    char nickname[NICKNAME_SIZE];
 
     struct _Client_ *next;
     struct _Client_ *prev;
@@ -76,6 +78,7 @@ int main(int argc, char **argv) {
         Client *p_client_fd = malloc(sizeof(Client));
         p_client_fd->fd = client_fd;
         p_client_fd->addr = client_addr;
+        strncpy(p_client_fd->nickname, inet_ntoa(client_addr.sin_addr), NICKNAME_SIZE);
 
         if (server_clients_last == NULL) {
             p_client_fd->next = NULL;
@@ -104,36 +107,53 @@ int main(int argc, char **argv) {
 
 void *handle_client(void *ptr) {
     Client *client = (Client*)ptr;
-
-    char *buf = calloc(SERVER_MESSAGE_SIZE, sizeof(char));
-    if (buf == NULL) {
-        fprintf(stderr, "Could not create buffer for message\n");
-        close(client->fd);
-        return NULL;
-    }
+    
+    char buf[SERVER_MESSAGE_SIZE] = { 0 }; /* recv buffer */
+    char temp[SERVER_MESSAGE_SIZE * 2] = { 0 }; /* message that will be sent to all the clients */
     
     while (recv(client->fd, buf, SERVER_MESSAGE_SIZE, 0) > 0) {
-        char *s = inet_ntoa(client->addr.sin_addr);
+        char *s = client->nickname;
         printf("%s: %s", s, buf);
-        Client *current = server_clients_first;
-        while (current != NULL) {
-            if (current != client) {
-                char *temp = calloc(SERVER_MESSAGE_SIZE*2, sizeof(char));
-                if (temp == NULL) {
-                    fprintf(stderr, "Could not create buffer for message\n");
-                    continue;
-                }
-                snprintf(temp, SERVER_MESSAGE_SIZE*2, "%s: %s", s, buf);
-                send(current->fd, temp, SERVER_MESSAGE_SIZE*2, 0);
-                free(temp);
-            }
-            current = current->next;
+        
+        /* check for command */
+        if (buf[0] == '/') {
+        	char *p = buf;
+        	while (*p != ' ' && *p != '\0') p++;
+        	*p = '\0';
+        	if (!strcmp(buf + 1, "nick")) {
+        		/* set the new nickname */
+        		p++;
+        		char *q = p;
+        		while (*q != '\n') q++;
+        		*q = '\0';
+        		if (*p == '\0') {
+        			/* there is no nickname: do nothing */
+        			/* should maybe report that to the client */
+        			continue;
+        		} else {
+        			char old_nickname[NICKNAME_SIZE];
+        			strncpy(old_nickname, client->nickname, NICKNAME_SIZE);
+        			strncpy(client->nickname, p, NICKNAME_SIZE);
+        			snprintf(temp, SERVER_MESSAGE_SIZE*2, "%s is now known as %s.\n", old_nickname, p);
+        		}
+        	}
+        } else {
+        	snprintf(temp, SERVER_MESSAGE_SIZE*2, "%s: %s", s, buf);
         }
+        
+        /* send the message to each client */
+	Client *current = server_clients_first;
+	while (current != NULL) {
+		if (current != client) {
+			send(current->fd, temp, SERVER_MESSAGE_SIZE*2, 0);
+		}
+		current = current->next;
+	}
         memset(buf, 0, SERVER_MESSAGE_SIZE);
+        memset(temp, 0, SERVER_MESSAGE_SIZE*2);
     }
     close(client->fd);
 
-    free(buf);
     if (client->next != NULL) {
         client->next->prev = client->prev;
     } else if (client->prev != NULL) {
