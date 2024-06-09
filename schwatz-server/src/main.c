@@ -118,19 +118,21 @@ void *handle_client(void *ptr) {
         /* check for command */
         if (buf[0] == '/') {
         	char *p = buf;
-        	while (*p != ' ' && *p != '\0') p++;
+        	while (*p != ' ' && *p != '\n' && *p != '\0') p++;
         	*p = '\0';
         	if (!strcmp(buf + 1, "nick")) {
         		/* set the new nickname */
         		p++;
-        		char *q = p;
-        		while (*q != '\n') q++;
-        		*q = '\0';
         		if (*p == '\0') {
         			/* there is no nickname: do nothing */
         			/* should maybe report that to the client */
+        			send(client->fd, "Error: invalid nickname.\n", 26, 0);
+        			printf("Error: invalid nickname.\n");
         			continue;
         		} else {
+				char *q = p;
+				while (*q != '\n' && *q != '\0') q++;
+				*q = '\0';
         			char old_nickname[NICKNAME_SIZE];
         			strncpy(old_nickname, client->nickname, NICKNAME_SIZE);
         			strncpy(client->nickname, p, NICKNAME_SIZE);
