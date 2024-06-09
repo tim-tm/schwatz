@@ -71,12 +71,12 @@ void *read_server(void *ptr) {
     free(ptr);
 
     while (1) {
-        char *server_msg = calloc(MAX_MESSAGE_SIZE, sizeof(char));
+        char *server_msg = calloc(MAX_MESSAGE_SIZE*2, sizeof(char));
         if (server_msg == NULL) {
             fprintf(stderr, "Failed to allocate memory for server_msg!\n");
             return NULL;
         }
-        if (read(socket_fd, server_msg, MAX_MESSAGE_SIZE) == -1) {
+        if (read(socket_fd, server_msg, MAX_MESSAGE_SIZE*2) == -1) {
             fprintf(stderr, "Failed to read message: %s\n", strerror(errno));
             continue;
         }
