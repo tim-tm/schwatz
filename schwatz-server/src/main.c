@@ -11,6 +11,16 @@
 
 #define SERVER_MESSAGE_SIZE 512
 
+enum ClientCommand {
+    CLIENT_COMMAND_ERROR = -1,
+    CLIENT_COMMAND_ENCRYPTION_START = 1
+};
+
+enum ServerCommand {
+    SERVER_COMMAND_ERROR = -1,
+    SERVER_COMMAND_ENCRYPTION_START = 1
+};
+
 typedef struct _Client_ {
     int fd;
     struct sockaddr_in addr;
@@ -22,6 +32,8 @@ typedef struct _Client_ {
 static Client *server_clients_last;
 static Client *server_clients_first;
 
+void send_error(Client *client, const char *msg);
+int client_gen_keys(Client *client);
 void *handle_client(void *ptr);
 
 int main(int argc, char **argv) {
@@ -112,8 +124,79 @@ void *handle_client(void *ptr) {
         return NULL;
     }
     
-    while (recv(client->fd, buf, SERVER_MESSAGE_SIZE, 0) > 0) {
+    int failed = 0;
+    while (recv(client->fd, buf, SERVER_MESSAGE_SIZE, 0) > 0 && !failed) {
         char *s = inet_ntoa(client->addr.sin_addr);
+
+        char *cmd_start;
+        if ((cmd_start = strstr(buf, "/cmd")) != NULL) {
+            // a command is structured like this: "/cmd <id> <message>"
+            // This code splits the string by " " to store the id and message
+            char *buf_copy = calloc(SERVER_MESSAGE_SIZE, sizeof(char));
+            if (buf_copy == NULL) {
+                fprintf(stderr, "Failed to allocate memory for buf_copy!\n");
+                failed = 1;
+            }
+            strncpy(buf_copy, buf, SERVER_MESSAGE_SIZE);
+
+            // extract the id
+            // commands[0] = "/cmd"
+            // commands[1] = "<id>"
+            char *commands[3] = {0};
+            char *split = strtok(cmd_start, " ");
+            for (size_t i = 0; i < 2 && split != NULL; ++i) {
+                commands[i] = split;
+                split = strtok(NULL, " ");
+            }
+
+            if (split != NULL) {
+                // extract the full message
+                // commands[2] = "<message>"
+                char *msg_start = strstr(buf_copy, split);
+                if (msg_start != NULL) {
+                    commands[2] = msg_start;
+                }
+            }
+
+            // turn the id into an integer value
+            // use an enum to properly switch on the value
+            char *end;
+            enum ServerCommand command = strtol(commands[1], &end, 10);
+            if (*end != '\0') {
+                fprintf(stderr, "Invalid client command! (%s)\nThe client could run on a different version!\n", commands[1]);
+                free(buf_copy);
+                failed = 1;
+                continue;
+            }
+
+            switch (command) {
+                case CLIENT_COMMAND_ERROR: {
+                    fprintf(stderr, "Client error: %s\n", commands[2]);
+                    failed = 1;
+                } break;
+                case CLIENT_COMMAND_ENCRYPTION_START: {
+                    if (client_gen_keys(client) != 0) {
+                        send_error(client, "Failed to generate keys!");
+                        memset(buf, 0, SERVER_MESSAGE_SIZE);
+                        free(buf_copy);
+                        failed = 1;
+                        continue;
+                    }
+
+                    char msg[SERVER_MESSAGE_SIZE*2];
+                    snprintf(msg, SERVER_MESSAGE_SIZE*2, "/cmd %d", SERVER_COMMAND_ENCRYPTION_START);
+                    send(client->fd, msg, SERVER_MESSAGE_SIZE*2, 0);
+                } break;
+                default: {
+                    fprintf(stderr, "Invalid client command! (%s)\nThe client could run on a different version!\n", commands[1]);
+                    failed = 1;
+                } break;
+            }
+            free(buf_copy);
+            memset(buf, 0, SERVER_MESSAGE_SIZE);
+            continue;
+        }
+
         printf("%s: %s", s, buf);
         Client *current = server_clients_first;
         while (current != NULL) {
@@ -144,4 +227,16 @@ void *handle_client(void *ptr) {
     }
     free(client);
     return NULL;
+}
+
+int client_gen_keys(Client *client) {
+    if (client == NULL) return 1;
+    return 1;
+}
+
+void send_error(Client *client, const char *msg) {
+    if (client == NULL || msg == NULL) return;
+    char error_msg[SERVER_MESSAGE_SIZE*2];
+    snprintf(error_msg, SERVER_MESSAGE_SIZE*2, "/cmd %d %s", SERVER_COMMAND_ERROR, msg);
+    send(client->fd, error_msg, SERVER_MESSAGE_SIZE*2, 0);
 }
