@@ -138,6 +138,19 @@ void *handle_client(void *ptr) {
         			strncpy(client->nickname, p, NICKNAME_SIZE);
         			snprintf(temp, SERVER_MESSAGE_SIZE*2, "%s is now known as %s.\n", old_nickname, p);
         		}
+        	} else if (!strcmp(buf + 1, "list")) {
+        		/* list users */
+        		Client *current = server_clients_first;
+        		char list[SERVER_MESSAGE_SIZE * 2];
+        		
+        		/* warning: too much clients could cause a buffer overflow */
+        		while (current != NULL) {
+        			strcat(list, "- ");
+        			strcat(list, current->nickname);
+        			strcat(list, "\n");
+        			current = current->next;
+        		}
+        		send(client->fd, list, SERVER_MESSAGE_SIZE*2, 0);
         	}
         } else {
         	snprintf(temp, SERVER_MESSAGE_SIZE*2, "%s: %s", s, buf);
