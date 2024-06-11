@@ -58,6 +58,10 @@ Connecting on the default port would look like this:
 ./schwatz localhost 9999
 ```
 
+## Documentation
+
+If you're interested in the way schwatz is implemented, take a look at the [protocol.md](https://github.com/tim-tm/schwatz/blob/main/docs/protocol.md).
+
 ## Contributing
 
 Contributions are welcomed, please take a look at the [issue-tracker](https://github.com/tim-tm/schwatz/issues) or 
