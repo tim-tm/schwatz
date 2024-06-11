@@ -12,11 +12,9 @@
 #include <stdbool.h>
 #include <sodium.h>
 
-/**
- * TODO: Send and receive encrypted messages encrypted with the exchanged keys
- */
-
 #define MAX_MESSAGE_SIZE 512
+#define SERVER_ENCRYPTED_MESSAGE_SIZE (crypto_box_MACBYTES+crypto_box_NONCEBYTES+MAX_MESSAGE_SIZE*2)
+#define CIPHER_MESSAGE_SIZE (crypto_box_MACBYTES+MAX_MESSAGE_SIZE*2)
 
 enum ClientCommand {
     CLIENT_COMMAND_ERROR = -1,
@@ -35,6 +33,8 @@ static unsigned char secret_key[crypto_box_SECRETKEYBYTES];
 static unsigned char server_public_key[crypto_box_PUBLICKEYBYTES];
 static bool encrypted = false;
 
+void print_hex(unsigned char *data, size_t data_len);
+bool read_message(int socket_fd, void *msg);
 bool send_command(int socket_fd, enum ClientCommand cmd, const char *msg);
 bool handle_encryption(int socket_fd);
 void *read_server(void *ptr);
@@ -106,6 +106,48 @@ int main(int argc, char **argv) {
     return 0;
 }
 
+void print_hex(unsigned char *data, size_t data_len) {
+    for (size_t i = 0; i < data_len; ++i) {
+        printf("%02x", data[i]);
+    }
+    printf("\n");
+}
+
+bool read_message(int socket_fd, void *msg) {
+    if (socket_fd == -1 || msg == NULL) return false;
+    if (encrypted) {
+        unsigned char server_msg[SERVER_ENCRYPTED_MESSAGE_SIZE];
+        if (read(socket_fd, server_msg, SERVER_ENCRYPTED_MESSAGE_SIZE) == -1) {
+            fprintf(stderr, "Failed to read message from server: %s\n", strerror(errno));
+            return false;
+        }
+
+        unsigned char cipher_msg[CIPHER_MESSAGE_SIZE];
+        memcpy(cipher_msg, server_msg, CIPHER_MESSAGE_SIZE);
+
+        unsigned char nonce[crypto_box_NONCEBYTES];
+        memcpy(nonce, server_msg+CIPHER_MESSAGE_SIZE, crypto_box_NONCEBYTES);
+        
+        unsigned char decrypted[MAX_MESSAGE_SIZE*2];
+        if (crypto_box_open_easy(decrypted,
+                    cipher_msg,
+                    CIPHER_MESSAGE_SIZE,
+                    nonce,
+                    server_public_key,
+                    secret_key) != 0) {
+            fprintf(stderr, "Failed to decrypt message from server\n");
+            return false;
+        }
+        memcpy(msg, decrypted, MAX_MESSAGE_SIZE*2);       
+    } else {
+        if (read(socket_fd, msg, MAX_MESSAGE_SIZE*2) == -1) {
+            fprintf(stderr, "Failed to read message from server: %s\n", strerror(errno));
+            return false;
+        }
+    }
+    return true;
+}
+
 bool send_command(int socket_fd, enum ClientCommand cmd, const char *msg) {
     if (socket_fd == -1 || msg == NULL) return false;
 
@@ -124,15 +166,14 @@ void *read_server(void *ptr) {
     free(ptr);
 
     while (1) {
-        char *server_msg = calloc(MAX_MESSAGE_SIZE*2, sizeof(char));
+        void *server_msg = calloc(MAX_MESSAGE_SIZE*2, sizeof(char));
         if (server_msg == NULL) {
             fprintf(stderr, "Failed to allocate memory for server_msg!\n");
             read_thread_return = 1;
             return NULL;
         }
 
-        if (read(socket_fd, server_msg, MAX_MESSAGE_SIZE*2) == -1) {
-            fprintf(stderr, "Failed read message from server: %s\n", strerror(errno));
+        if (!read_message(socket_fd, server_msg)) {
             read_thread_return = 1;
             return NULL;
         }
@@ -152,7 +193,7 @@ void *read_server(void *ptr) {
             // extract the id
             // commands[0] = "/cmd"
             // commands[1] = "<id>"
-            char *commands[3] = {0};
+            void *commands[3] = {0};
             char *split = strtok(cmd_start, " ");
             for (size_t i = 0; i < 2 && split != NULL; ++i) {
                 commands[i] = split;
@@ -162,7 +203,7 @@ void *read_server(void *ptr) {
             if (split != NULL) {
                 // extract the full message
                 // commands[2] = "<message>"
-                char *msg_start = strstr(server_msg_copy, split);
+                void *msg_start = strstr(server_msg_copy, split);
                 if (msg_start != NULL) {
                     commands[2] = msg_start;
                 }
@@ -173,7 +214,7 @@ void *read_server(void *ptr) {
             char *end;
             enum ServerCommand command = strtol(commands[1], &end, 10);
             if (*end != '\0') {
-                fprintf(stderr, "Invalid server command! (%s)\nThe server could run on a different version!\n", commands[1]);
+                fprintf(stderr, "Invalid server command! (%s)\nThe server could run on a different version!\n", (char*)commands[1]);
                 free(server_msg_copy);
                 free(server_msg);
                 read_thread_return = 1;
@@ -182,7 +223,7 @@ void *read_server(void *ptr) {
 
             switch (command) {
                 case SERVER_COMMAND_ERROR: {
-                    fprintf(stderr, "Server error: %s\n", commands[2]);
+                    fprintf(stderr, "Server error: %s\n", (char*)commands[2]);
                     free(server_msg_copy);
                     free(server_msg);
                     read_thread_return = 1;
@@ -191,13 +232,15 @@ void *read_server(void *ptr) {
                 case SERVER_COMMAND_ENCRYPTION_HANDSHAKE: {
                     if (commands[2] != NULL) {
                         for (size_t i = 0; i < crypto_box_PUBLICKEYBYTES; ++i) {
-                            server_public_key[i] = commands[2][i];
+                            server_public_key[i] = ((unsigned char*)commands[2])[i];
                         }
+                        printf("server_public_key\n");
+                        print_hex(server_public_key, crypto_box_PUBLICKEYBYTES);
                         encrypted = true;
                     }
                 } break;
                 default: {
-                    fprintf(stderr, "Invalid server command! (%s)\nThe server could run on a different version!\n", commands[1]);
+                    fprintf(stderr, "Invalid server command! (%s)\nThe server could run on a different version!\n", (char*)commands[1]);
                     free(server_msg_copy);
                     free(server_msg);
                     read_thread_return = 1;
@@ -208,7 +251,7 @@ void *read_server(void *ptr) {
             free(server_msg);
             continue;
         }
-        printf("%s", server_msg);
+        printf("%s", (char*)server_msg);
         free(server_msg);
     }
     read_thread_return = 0;
@@ -227,10 +270,14 @@ bool handle_encryption(int socket_fd) {
     }
 
     crypto_box_keypair(public_key, secret_key);
+    printf("public_key\n");
+    print_hex(public_key, crypto_box_PUBLICKEYBYTES);
+    printf("secret_key\n");
+    print_hex(secret_key, crypto_box_SECRETKEYBYTES);
     if (!send_command(socket_fd, CLIENT_COMMAND_ENCRYPTION_HANDSHAKE, (char*)public_key)) return false;
 
     // wait for the read thread to set the server_public_key
-    while (!encrypted) {}
+    while (!encrypted) { }
     
     return true;
 }
