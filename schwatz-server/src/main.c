@@ -8,22 +8,31 @@
 #include <unistd.h>
 #include <stdlib.h>
 #include <arpa/inet.h>
+#include <sodium.h>
+
+/**
+ * TODO: Send and receive encrypted messages encrypted with the exchanged keys
+ */
 
 #define SERVER_MESSAGE_SIZE 512
 
 enum ClientCommand {
     CLIENT_COMMAND_ERROR = -1,
-    CLIENT_COMMAND_ENCRYPTION_START = 1
+    CLIENT_COMMAND_ENCRYPTION_HANDSHAKE = 1
 };
 
 enum ServerCommand {
     SERVER_COMMAND_ERROR = -1,
-    SERVER_COMMAND_ENCRYPTION_START = 1
+    SERVER_COMMAND_ENCRYPTION_HANDSHAKE = 1
 };
 
 typedef struct _Client_ {
     int fd;
     struct sockaddr_in addr;
+    unsigned char public_key[crypto_box_PUBLICKEYBYTES];
+    unsigned char secret_key[crypto_box_SECRETKEYBYTES];
+    unsigned char client_public_key[crypto_box_PUBLICKEYBYTES];
+    bool encrypted;
 
     struct _Client_ *next;
     struct _Client_ *prev;
@@ -32,8 +41,8 @@ typedef struct _Client_ {
 static Client *server_clients_last;
 static Client *server_clients_first;
 
-void send_error(Client *client, const char *msg);
-int client_gen_keys(Client *client);
+bool send_command(Client *client, enum ServerCommand cmd,  const char *msg);
+bool client_gen_keys(Client *client, char *client_public_key);
 void *handle_client(void *ptr);
 
 int main(int argc, char **argv) {
@@ -114,6 +123,17 @@ int main(int argc, char **argv) {
     return 0;
 }
 
+bool send_command(Client *client, enum ServerCommand cmd,  const char *msg) {
+    if (client == NULL || msg == NULL) return false;
+    char sent_msg[SERVER_MESSAGE_SIZE*2];
+    snprintf(sent_msg, SERVER_MESSAGE_SIZE*2, "/cmd %d %s", cmd, msg);
+    if (send(client->fd, sent_msg, SERVER_MESSAGE_SIZE*2, 0) == -1) {
+        fprintf(stderr, "Failed to send message: %s\n", strerror(errno));
+        return false;
+    }
+    return true;
+}
+
 void *handle_client(void *ptr) {
     Client *client = (Client*)ptr;
 
@@ -174,18 +194,15 @@ void *handle_client(void *ptr) {
                     fprintf(stderr, "Client error: %s\n", commands[2]);
                     failed = 1;
                 } break;
-                case CLIENT_COMMAND_ENCRYPTION_START: {
-                    if (client_gen_keys(client) != 0) {
-                        send_error(client, "Failed to generate keys!");
+                case CLIENT_COMMAND_ENCRYPTION_HANDSHAKE: {
+                    if (!client_gen_keys(client, commands[2])) {
+                        send_command(client, SERVER_COMMAND_ERROR, "Failed to generate keys!");
                         memset(buf, 0, SERVER_MESSAGE_SIZE);
                         free(buf_copy);
                         failed = 1;
                         continue;
                     }
-
-                    char msg[SERVER_MESSAGE_SIZE*2];
-                    snprintf(msg, SERVER_MESSAGE_SIZE*2, "/cmd %d", SERVER_COMMAND_ENCRYPTION_START);
-                    send(client->fd, msg, SERVER_MESSAGE_SIZE*2, 0);
+                    client->encrypted = true;
                 } break;
                 default: {
                     fprintf(stderr, "Invalid client command! (%s)\nThe client could run on a different version!\n", commands[1]);
@@ -229,14 +246,14 @@ void *handle_client(void *ptr) {
     return NULL;
 }
 
-int client_gen_keys(Client *client) {
-    if (client == NULL) return 1;
-    return 1;
-}
+bool client_gen_keys(Client *client, char *client_public_key) {
+    if (client == NULL || client_public_key == NULL) return false;
 
-void send_error(Client *client, const char *msg) {
-    if (client == NULL || msg == NULL) return;
-    char error_msg[SERVER_MESSAGE_SIZE*2];
-    snprintf(error_msg, SERVER_MESSAGE_SIZE*2, "/cmd %d %s", SERVER_COMMAND_ERROR, msg);
-    send(client->fd, error_msg, SERVER_MESSAGE_SIZE*2, 0);
+    for (size_t i = 0; i < crypto_box_PUBLICKEYBYTES; ++i) {
+        client->client_public_key[i] = client_public_key[i];
+    }
+    
+    crypto_box_keypair(client->public_key, client->secret_key);
+    if (!send_command(client, SERVER_COMMAND_ENCRYPTION_HANDSHAKE, (char*)client->public_key)) return false;    
+    return true;
 }

@@ -9,23 +9,34 @@
 #include <sys/socket.h>
 #include <time.h>
 #include <unistd.h>
+#include <stdbool.h>
+#include <sodium.h>
+
+/**
+ * TODO: Send and receive encrypted messages encrypted with the exchanged keys
+ */
 
 #define MAX_MESSAGE_SIZE 512
 
 enum ClientCommand {
     CLIENT_COMMAND_ERROR = -1,
-    CLIENT_COMMAND_ENCRYPTION_START = 1
+    CLIENT_COMMAND_ENCRYPTION_HANDSHAKE = 1
 };
 
 enum ServerCommand {
     SERVER_COMMAND_ERROR = -1,
-    SERVER_COMMAND_ENCRYPTION_START = 1
+    SERVER_COMMAND_ENCRYPTION_HANDSHAKE = 1
 };
 
 static pthread_t read_thread;
 static int read_thread_return = -1;
+static unsigned char public_key[crypto_box_PUBLICKEYBYTES];
+static unsigned char secret_key[crypto_box_SECRETKEYBYTES];
+static unsigned char server_public_key[crypto_box_PUBLICKEYBYTES];
+static bool encrypted = false;
 
-int handle_encryption(int socket_fd);
+bool send_command(int socket_fd, enum ClientCommand cmd, const char *msg);
+bool handle_encryption(int socket_fd);
 void *read_server(void *ptr);
 
 int main(int argc, char **argv) {
@@ -69,7 +80,7 @@ int main(int argc, char **argv) {
     *p_socket_fd = socket_fd;
     pthread_create(&read_thread, NULL, read_server, p_socket_fd);
 
-    if (handle_encryption(socket_fd) == -1) {
+    if (!handle_encryption(socket_fd)) {
         return 1;
     }
 
@@ -93,6 +104,19 @@ int main(int argc, char **argv) {
     pthread_detach(read_thread);
     close(socket_fd);
     return 0;
+}
+
+bool send_command(int socket_fd, enum ClientCommand cmd, const char *msg) {
+    if (socket_fd == -1 || msg == NULL) return false;
+
+    char sent_msg[MAX_MESSAGE_SIZE] = {0};
+    snprintf(sent_msg, MAX_MESSAGE_SIZE, "/cmd %d %s", cmd, msg);
+
+    if (send(socket_fd, sent_msg, MAX_MESSAGE_SIZE, 0) == -1) {
+        fprintf(stderr, "Failed to send message: %s\n", strerror(errno));
+        return false;
+    }
+    return true;
 }
 
 void *read_server(void *ptr) {
@@ -164,8 +188,13 @@ void *read_server(void *ptr) {
                     read_thread_return = 1;
                     return NULL;
                 } break;
-                case SERVER_COMMAND_ENCRYPTION_START: {
-                    fprintf(stderr, "%s, %s\n", commands[1], commands[2]);
+                case SERVER_COMMAND_ENCRYPTION_HANDSHAKE: {
+                    if (commands[2] != NULL) {
+                        for (size_t i = 0; i < crypto_box_PUBLICKEYBYTES; ++i) {
+                            server_public_key[i] = commands[2][i];
+                        }
+                        encrypted = true;
+                    }
                 } break;
                 default: {
                     fprintf(stderr, "Invalid server command! (%s)\nThe server could run on a different version!\n", commands[1]);
@@ -186,19 +215,22 @@ void *read_server(void *ptr) {
     return NULL;
 }
 
-int handle_encryption(int socket_fd) {
+bool handle_encryption(int socket_fd) {
     if (socket_fd == -1) {
         fprintf(stderr, "Failed to start encryption: invalid socket!\n");
-        return -1;
+        return false;
     }
 
-    char enc_start[MAX_MESSAGE_SIZE] = {0};
-    snprintf(enc_start, MAX_MESSAGE_SIZE, "/cmd %d", CLIENT_COMMAND_ENCRYPTION_START);
-
-    if (send(socket_fd, enc_start, MAX_MESSAGE_SIZE, 0) == -1) {
-        fprintf(stderr, "Failed to send message: %s\n", strerror(errno));
-        return 1;
+    if (sodium_init() != 0) {
+        fprintf(stderr, "Failed to init sodium!\n");
+        return false;
     }
 
-    return 0;
+    crypto_box_keypair(public_key, secret_key);
+    if (!send_command(socket_fd, CLIENT_COMMAND_ENCRYPTION_HANDSHAKE, (char*)public_key)) return false;
+
+    // wait for the read thread to set the server_public_key
+    while (!encrypted) {}
+    
+    return true;
 }

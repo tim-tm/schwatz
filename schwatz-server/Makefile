@@ -1,7 +1,7 @@
 CC := gcc
 CFLAGS := -Wall -Wextra -std=c99 -g -ggdb2 -pedantic -Wpedantic
 DEFINES :=
-LIBS := -lpthread
+LIBS := -lpthread -lsodium
 
 ifeq ($(BUILD_TYPE), RELEASE)
 CFLAGS := -Wall -Wextra -std=c99 -O3 -pedantic -Wpedantic
