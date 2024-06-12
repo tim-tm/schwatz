@@ -64,7 +64,6 @@ If you're interested in the way schwatz is implemented, take a look at the [prot
 
 ## Contributing
 
-Contributions are welcomed, please take a look at the [issue-tracker](https://github.com/tim-tm/schwatz/issues) or 
-the [TODO.md](https://github.com/tim-tm/schwatz/blob/main/TODO.md) file.
+Contributions are welcomed, please take a look at the [TODO.md](https://github.com/tim-tm/schwatz/blob/main/TODO.md) file.
 
 Everything should of course be compatible with the [license](https://github.com/tim-tm/schwatz/blob/main/LICENSE).

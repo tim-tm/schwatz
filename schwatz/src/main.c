@@ -12,9 +12,11 @@
 #include <stdbool.h>
 #include <sodium.h>
 
-#define MAX_MESSAGE_SIZE 512
-#define SERVER_ENCRYPTED_MESSAGE_SIZE (crypto_box_MACBYTES+crypto_box_NONCEBYTES+MAX_MESSAGE_SIZE*2)
-#define CIPHER_MESSAGE_SIZE (crypto_box_MACBYTES+MAX_MESSAGE_SIZE*2)
+#define MESSAGE_SIZE 512
+#define SERVER_ENCRYPTED_MESSAGE_SIZE (crypto_box_MACBYTES+crypto_box_NONCEBYTES+MESSAGE_SIZE*2)
+#define SERVER_CIPHER_MESSAGE_SIZE (crypto_box_MACBYTES+MESSAGE_SIZE*2)
+#define CLIENT_ENCRYPTED_MESSAGE_SIZE (crypto_box_MACBYTES+crypto_box_NONCEBYTES+MESSAGE_SIZE)
+#define CLIENT_CIPHER_MESSAGE_SIZE (crypto_box_MACBYTES+MESSAGE_SIZE)
 
 enum ClientCommand {
     CLIENT_COMMAND_ERROR = -1,
@@ -33,6 +35,7 @@ static unsigned char secret_key[crypto_box_SECRETKEYBYTES];
 static unsigned char server_public_key[crypto_box_PUBLICKEYBYTES];
 static bool encrypted = false;
 
+bool send_message(int socket_fd, const char *msg);
 void print_hex(unsigned char *data, size_t data_len);
 bool read_message(int socket_fd, void *msg);
 bool send_command(int socket_fd, enum ClientCommand cmd, const char *msg);
@@ -84,26 +87,58 @@ int main(int argc, char **argv) {
         return 1;
     }
 
-    char input[MAX_MESSAGE_SIZE];
-    while (fgets(input, MAX_MESSAGE_SIZE, stdin) != NULL) {
+    char input[MESSAGE_SIZE];
+    while (fgets(input, MESSAGE_SIZE, stdin) != NULL) {
         if (read_thread_return != -1) return 1;
 
         if (strstr(input, "/cmd") != NULL) {
             fprintf(stderr, "Failed to send message: Message should not contain \"/cmd\"\n");
-            memset(input, 0, MAX_MESSAGE_SIZE);
+            memset(input, 0, MESSAGE_SIZE);
             continue;
         }
 
-        if (send(socket_fd, input, MAX_MESSAGE_SIZE, 0) == -1) {
-            fprintf(stderr, "Failed to send message: %s\n", strerror(errno));
+        if (!send_message(socket_fd, input)) {
             return 1;
         }
-        memset(input, 0, MAX_MESSAGE_SIZE);
+        memset(input, 0, MESSAGE_SIZE);
     }
 
     pthread_detach(read_thread);
     close(socket_fd);
     return 0;
+}
+
+bool send_message(int socket_fd, const char *msg) {
+    if (socket_fd == -1 || msg == NULL) return false;
+
+    if (encrypted) {
+        unsigned char nonce[crypto_box_NONCEBYTES];
+        unsigned char cipher_text[CLIENT_CIPHER_MESSAGE_SIZE];
+        // sent_msg: "cipher_text"+"nonce"
+        unsigned char sent_msg[CLIENT_ENCRYPTED_MESSAGE_SIZE];
+
+        unsigned char uc_msg[MESSAGE_SIZE];
+        memcpy(uc_msg, msg, MESSAGE_SIZE);
+        randombytes_buf(nonce, sizeof(nonce));
+        if (crypto_box_easy(cipher_text, uc_msg, MESSAGE_SIZE, nonce, server_public_key, secret_key) != 0) {
+            fprintf(stderr, "Failed to encrypt message\n");
+            return false;
+        }
+
+        memcpy(sent_msg, cipher_text, CLIENT_CIPHER_MESSAGE_SIZE);
+        memcpy(sent_msg+CLIENT_CIPHER_MESSAGE_SIZE, nonce, crypto_box_NONCEBYTES);
+
+        if (send(socket_fd, sent_msg, CLIENT_ENCRYPTED_MESSAGE_SIZE, 0) == -1) {
+            fprintf(stderr, "Failed to send message: %s\n", strerror(errno));
+            return false;
+        }
+    } else {
+        if (send(socket_fd, msg, MESSAGE_SIZE, 0) == -1) {
+            fprintf(stderr, "Failed to send message: %s\n", strerror(errno));
+            return false;
+        }
+    }
+    return true;
 }
 
 void print_hex(unsigned char *data, size_t data_len) {
@@ -122,25 +157,25 @@ bool read_message(int socket_fd, void *msg) {
             return false;
         }
 
-        unsigned char cipher_msg[CIPHER_MESSAGE_SIZE];
-        memcpy(cipher_msg, server_msg, CIPHER_MESSAGE_SIZE);
+        unsigned char cipher_msg[SERVER_CIPHER_MESSAGE_SIZE];
+        memcpy(cipher_msg, server_msg, SERVER_CIPHER_MESSAGE_SIZE);
 
         unsigned char nonce[crypto_box_NONCEBYTES];
-        memcpy(nonce, server_msg+CIPHER_MESSAGE_SIZE, crypto_box_NONCEBYTES);
+        memcpy(nonce, server_msg+SERVER_CIPHER_MESSAGE_SIZE, crypto_box_NONCEBYTES);
         
-        unsigned char decrypted[MAX_MESSAGE_SIZE*2];
+        unsigned char decrypted[MESSAGE_SIZE*2];
         if (crypto_box_open_easy(decrypted,
                     cipher_msg,
-                    CIPHER_MESSAGE_SIZE,
+                    SERVER_CIPHER_MESSAGE_SIZE,
                     nonce,
                     server_public_key,
                     secret_key) != 0) {
             fprintf(stderr, "Failed to decrypt message from server\n");
             return false;
         }
-        memcpy(msg, decrypted, MAX_MESSAGE_SIZE*2);       
+        memcpy(msg, decrypted, MESSAGE_SIZE*2);
     } else {
-        if (read(socket_fd, msg, MAX_MESSAGE_SIZE*2) == -1) {
+        if (read(socket_fd, msg, MESSAGE_SIZE*2) == -1) {
             fprintf(stderr, "Failed to read message from server: %s\n", strerror(errno));
             return false;
         }
@@ -151,11 +186,10 @@ bool read_message(int socket_fd, void *msg) {
 bool send_command(int socket_fd, enum ClientCommand cmd, const char *msg) {
     if (socket_fd == -1 || msg == NULL) return false;
 
-    char sent_msg[MAX_MESSAGE_SIZE] = {0};
-    snprintf(sent_msg, MAX_MESSAGE_SIZE, "/cmd %d %s", cmd, msg);
+    char sent_msg[MESSAGE_SIZE] = {0};
+    snprintf(sent_msg, MESSAGE_SIZE, "/cmd %d %s", cmd, msg);
 
-    if (send(socket_fd, sent_msg, MAX_MESSAGE_SIZE, 0) == -1) {
-        fprintf(stderr, "Failed to send message: %s\n", strerror(errno));
+    if (!send_message(socket_fd, sent_msg)) {
         return false;
     }
     return true;
@@ -166,7 +200,7 @@ void *read_server(void *ptr) {
     free(ptr);
 
     while (1) {
-        void *server_msg = calloc(MAX_MESSAGE_SIZE*2, sizeof(char));
+        void *server_msg = calloc(MESSAGE_SIZE*2, sizeof(char));
         if (server_msg == NULL) {
             fprintf(stderr, "Failed to allocate memory for server_msg!\n");
             read_thread_return = 1;
@@ -182,13 +216,13 @@ void *read_server(void *ptr) {
         if ((cmd_start = strstr(server_msg, "/cmd")) != NULL) {
             // a command is structured like this: "/cmd <id> <message>"
             // This code splits the string by " " to store the id and message
-            char *server_msg_copy = calloc(MAX_MESSAGE_SIZE*2, sizeof(char));
+            char *server_msg_copy = calloc(MESSAGE_SIZE*2, sizeof(char));
             if (server_msg_copy == NULL) {
                 fprintf(stderr, "Failed to allocate memory for server_msg_copy!\n");
                 read_thread_return = 1;
                 return NULL;
             }
-            strncpy(server_msg_copy, server_msg, MAX_MESSAGE_SIZE*2);
+            strncpy(server_msg_copy, server_msg, MESSAGE_SIZE*2);
 
             // extract the id
             // commands[0] = "/cmd"
