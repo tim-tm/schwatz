@@ -7,7 +7,7 @@ The schwatz project contains 'schwatz', the chat client and 'schwatz-server', th
 ## Features
 
 - [x] plain TCP communication
-- [ ] encryption
+- [x] encryption
 
 You may also want to view the [issues tab](https://github.com/tim-tm/schwatz/issues) for more details.
 
