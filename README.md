@@ -16,40 +16,32 @@ You may also want to view the [issues tab](https://github.com/tim-tm/schwatz/iss
 ### Building schwatz
 
 Toolchain:
-- GNU Make
-- GCC
+- any C compiler
 
 Libraries:
 - pthread
 - [sodium](https://doc.libsodium.org/)
 
-Clone the github repository:
+Compile schwatz:
 ```sh
-https://github.com/tim-tm/schwatz.git
-```
-
-Compile schwatz and schwatz-server:
-```sh
-make
+cc -Wall -Wextra nob.c -o nob
+./nob
 ```
 
 ### Using schwatz
 
 Start by running the server:
 ```sh
-cd schwatz-server
-make run
+./schwatz-server
 ```
 
 The default port is 9999, you can specify a custom port via. the command args:
 ```sh
-cd schwatz-server/build
 ./schwatz-server <port>
 ```
 
 Now connect to the server:
 ```sh
-cd schwatz/build
 ./schwatz <hostname> <port>
 ```
 
@@ -65,5 +57,4 @@ If you're interested in the way schwatz is implemented, take a look at the [prot
 ## Contributing
 
 Contributions are welcomed, please take a look at the [TODO.md](https://github.com/tim-tm/schwatz/blob/main/TODO.md) file.
-
 Everything should of course be compatible with the [license](https://github.com/tim-tm/schwatz/blob/main/LICENSE).
