@@ -5,7 +5,6 @@
 #include <string.h>
 #include <unistd.h>
 
-#define SZ_IMPLEMENTATION
 #include "sz.h"
 
 #define USAGE_STR "Usage: schwatz [client|server] <hostname> [port]"
