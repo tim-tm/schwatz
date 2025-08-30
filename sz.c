@@ -71,13 +71,24 @@ bool sz_read_message(sz_state *state, int target, void *buffer) {
         return false;
     }
 
+    ssize_t result;
     switch (state->type) {
     case SZ_STATE_TYPE_CLIENT: {
         if (state->encrypted) {
             unsigned char server_msg[SZ_SERVER_ENCRYPTED_MESSAGE_SIZE];
-            if (read(target, server_msg, SZ_SERVER_ENCRYPTED_MESSAGE_SIZE) ==
-                -1) {
+            result =
+                recv(target, server_msg, SZ_SERVER_ENCRYPTED_MESSAGE_SIZE, 0);
+            if (result == 0) {
+                printf("sz_read_message: Server socket shutdown\n");
+                return false;
+            } else if (result == -1) {
                 fprintf(stderr, "sz_read_message: %s\n", strerror(errno));
+                return false;
+            } else if (result != SZ_SERVER_ENCRYPTED_MESSAGE_SIZE) {
+                fprintf(stderr,
+                        "sz_read_message: couldn't recv all bytes from server. "
+                        "want: %d, got: %zu\n",
+                        SZ_SERVER_ENCRYPTED_MESSAGE_SIZE, result);
                 return false;
             }
 
@@ -99,8 +110,18 @@ bool sz_read_message(sz_state *state, int target, void *buffer) {
             }
             memcpy(buffer, decrypted, SZ_MESSAGE_SIZE);
         } else {
-            if (read(target, buffer, SZ_MESSAGE_SIZE) == -1) {
+            result = recv(target, buffer, SZ_MESSAGE_SIZE, 0);
+            if (result == 0) {
+                printf("sz_read_message: Server socket shutdown\n");
+                return false;
+            } else if (result == -1) {
                 fprintf(stderr, "sz_read_message: %s\n", strerror(errno));
+                return false;
+            } else if (result != SZ_MESSAGE_SIZE) {
+                fprintf(stderr,
+                        "sz_read_message: couldn't recv all bytes from server. "
+                        "want: %d, got: %zu\n",
+                        SZ_MESSAGE_SIZE, result);
                 return false;
             }
         }
@@ -118,9 +139,19 @@ bool sz_read_message(sz_state *state, int target, void *buffer) {
 
         if (client.encrypted) {
             unsigned char client_msg[SZ_CLIENT_ENCRYPTED_MESSAGE_SIZE];
-            if (read(client.fd, client_msg, SZ_CLIENT_ENCRYPTED_MESSAGE_SIZE) ==
-                -1) {
+            result = recv(client.fd, client_msg,
+                          SZ_CLIENT_ENCRYPTED_MESSAGE_SIZE, 0);
+            if (result == 0) {
+                printf("sz_read_message: Client socket shutdown\n");
+                return false;
+            } else if (result == -1) {
                 fprintf(stderr, "sz_read_message: %s\n", strerror(errno));
+                return false;
+            } else if (result != SZ_CLIENT_ENCRYPTED_MESSAGE_SIZE) {
+                fprintf(stderr,
+                        "sz_read_message: couldn't recv all bytes from client. "
+                        "want: %d, got: %zu\n",
+                        SZ_CLIENT_ENCRYPTED_MESSAGE_SIZE, result);
                 return false;
             }
 
@@ -142,11 +173,21 @@ bool sz_read_message(sz_state *state, int target, void *buffer) {
             }
             memcpy(buffer, decrypted, SZ_MESSAGE_SIZE);
         } else {
-            if (recv(client.fd, buffer, SZ_MESSAGE_SIZE, 0) == -1) {
+            result = recv(client.fd, buffer, SZ_MESSAGE_SIZE, 0);
+            if (result == 0) {
+                printf("sz_read_message: Client socket shutdown\n");
+                return false;
+            } else if (result == -1) {
                 fprintf(
                     stderr,
                     "sz_read_message: Failed to recv message from client: %s\n",
                     strerror(errno));
+                return false;
+            } else if (result != SZ_MESSAGE_SIZE) {
+                fprintf(stderr,
+                        "sz_read_message: couldn't recv all bytes from client. "
+                        "want: %d, got: %zu\n",
+                        SZ_MESSAGE_SIZE, result);
                 return false;
             }
         }
@@ -184,13 +225,13 @@ bool sz_send_message(sz_state *state, int target, const char *msg) {
             memcpy(sent_msg + SZ_CLIENT_CIPHER_MESSAGE_SIZE, nonce,
                    crypto_box_NONCEBYTES);
 
-            if (send(target, sent_msg, SZ_CLIENT_ENCRYPTED_MESSAGE_SIZE, 0) ==
-                -1) {
+            if (send(target, sent_msg, SZ_CLIENT_ENCRYPTED_MESSAGE_SIZE, 0) !=
+                SZ_CLIENT_ENCRYPTED_MESSAGE_SIZE) {
                 fprintf(stderr, "sz_send_message: %s\n", strerror(errno));
                 return false;
             }
         } else {
-            if (send(target, msg, SZ_MESSAGE_SIZE, 0) == -1) {
+            if (send(target, msg, SZ_MESSAGE_SIZE, 0) != SZ_MESSAGE_SIZE) {
                 fprintf(stderr, "sz_send_message: %s\n", strerror(errno));
                 return false;
             }

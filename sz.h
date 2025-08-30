@@ -4,7 +4,7 @@
 #include <stddef.h>
 #include <sys/socket.h>
 
-#define SZ_MESSAGE_SIZE 512
+#define SZ_MESSAGE_SIZE 256
 #define SZ_SERVER_ENCRYPTED_MESSAGE_SIZE                                       \
     (crypto_box_MACBYTES + crypto_box_NONCEBYTES + SZ_MESSAGE_SIZE)
 #define SZ_SERVER_CIPHER_MESSAGE_SIZE (crypto_box_MACBYTES + SZ_MESSAGE_SIZE)

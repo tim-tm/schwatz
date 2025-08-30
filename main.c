@@ -1,11 +1,14 @@
-#include <arpa/inet.h>
+#define _POSIX_C_SOUCRE 200809L
+#define _GNU_SOURCE
+
+#include "sz.h"
+
 #include <errno.h>
-#include <pthread.h>
-#include <stdio.h>
 #include <string.h>
 #include <unistd.h>
 
-#include "sz.h"
+#include <isocline.h>
+#include <pthread.h>
 
 #define USAGE_STR "Usage: schwatz [client|server] <hostname> [port]"
 
@@ -101,24 +104,31 @@ int main(int argc, char **argv) {
         while (!state->encrypted) {
         }
 
-        char input[SZ_MESSAGE_SIZE];
-        while (fgets(input, SZ_MESSAGE_SIZE, stdin) != NULL) {
-            printf("%s\n", input);
+        ic_set_history(NULL, -1);
+
+        char *input;
+        char msg[SZ_MESSAGE_SIZE];
+        while ((input = ic_readline("schwatz")) != NULL) {
+            size_t input_len = strnlen(input, SZ_MESSAGE_SIZE - 2);
+            strncpy(msg, input, input_len);
+
+            // needed to flush the pending message
+            msg[input_len] = '\n';
+            msg[input_len + 1] = '\0';
 
             if (read_thread_return != -1)
                 return 1;
 
-            if (strstr(input, "/cmd") != NULL) {
+            if (strstr(msg, "/cmd") != NULL) {
                 fprintf(stderr, "Failed to send message: Message should not "
                                 "contain '/cmd'\n");
-                memset(input, 0, SZ_MESSAGE_SIZE);
                 continue;
             }
 
-            if (!sz_send_message(state, socket_fd, input)) {
+            if (!sz_send_message(state, socket_fd, msg)) {
                 return 1;
             }
-            memset(input, 0, SZ_MESSAGE_SIZE);
+            free(input);
         }
         pthread_detach(read_thread);
     } break;
@@ -155,7 +165,6 @@ int main(int argc, char **argv) {
                 fprintf(stderr, "Could not accept client: internal error\n");
                 return 1;
             }
-            printf("client_id=%zu,\nclient_fd=%d\n", client_id, client_fd);
 
             pthread_t t;
             // will be free'd inside of the thread
@@ -346,8 +355,6 @@ void *server_handle_client(void *ptr) {
                 failed = 1;
             } break;
             case SZ_CLIENT_COMMAND_ENCRYPTION_HANDSHAKE: {
-                printf("%s\n",
-                       sz__hex_str(commands[2], crypto_box_PUBLICKEYBYTES));
                 if (!sz_handshake(state, client_id,
                                   (unsigned char *)commands[2])) {
                     sz_send_command(state, client_id, SZ_SERVER_COMMAND_ERROR,
