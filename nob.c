@@ -9,7 +9,7 @@ int main(int argc, char **argv) {
     nob_cc(&cmd);
     nob_cc_flags(&cmd);
     nob_cmd_append(&cmd, "-std=c99", "-g", "-ggdb2", "-pedantic", "-Wpedantic");
-    nob_cc_inputs(&cmd, "main.c");
+    nob_cc_inputs(&cmd, "sz.c", "main.c");
     nob_cc_output(&cmd, "schwatz");
     nob_cmd_append(&cmd, "-lpthread", "-lsodium");
 
