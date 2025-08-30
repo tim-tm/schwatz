@@ -32,22 +32,22 @@ cc -Wall -Wextra nob.c -o nob
 
 Start by running the server:
 ```sh
-./schwatz-server
+./schwatz server 127.0.0.1
 ```
 
-The default port is 9999, you can specify a custom port via. the command args:
+The default port is 9999, you can specify a custom port (e.g. `1337`) via. the command args:
 ```sh
-./schwatz-server <port>
+./schwatz server 127.0.0.1 1337
 ```
 
 Now connect to the server:
 ```sh
-./schwatz <hostname> <port>
+./schwatz client 127.0.0.1
 ```
 
-Connecting on the default port would look like this:
+The client also uses port `9999` by default, you can also specify a custom port:
 ```sh
-./schwatz localhost 9999
+./schwatz client 127.0.0.1 1337
 ```
 
 ## Documentation
