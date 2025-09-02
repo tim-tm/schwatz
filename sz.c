@@ -327,7 +327,7 @@ bool sz_read_command(sz_state *state, int target, sz_command *cmd) {
     }
 
     size_t id_size = sizeof(cmd->id);
-    char buf[SZ_TEXT_SIZE + 1];
+    char buf[SZ_TEXT_SIZE + id_size];
     if (!sz__read_value(state, target, buf, SZ_TEXT_SIZE + id_size)) {
         return false;
     }

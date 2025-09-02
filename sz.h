@@ -4,7 +4,7 @@
 #include <stddef.h>
 #include <sys/socket.h>
 
-#define SZ_TEXT_SIZE 256
+#define SZ_TEXT_SIZE 4096
 #define SZ_MAC_NONCE_BYTES (crypto_box_MACBYTES + crypto_box_NONCEBYTES)
 #define SZ_MAC_BYTES (crypto_box_MACBYTES)
 

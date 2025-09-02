@@ -4,35 +4,41 @@
 #include "sz.h"
 
 #include <errno.h>
+#include <netinet/tcp.h>
 #include <string.h>
 #include <unistd.h>
 
 #include <isocline.h>
 #include <pthread.h>
 
-#define USAGE_STR "Usage: schwatz [client|server] <hostname> [port]"
+#define USAGE_STR "[b]Usage: schwatz <client|server> <hostname> \\[port] [/]"
 
-void *client_read_server(void *ptr);
-void *server_handle_client(void *ptr);
+static void ic_word_completer(ic_completion_env_t *cenv, const char *word);
+static void ic_completer(ic_completion_env_t *cenv, const char *input);
+
+static void *client_read_server(void *ptr);
+static void *server_handle_client(void *ptr);
 
 static sz_state *state;
+static const char *completions[] = {"#help", "#exit", NULL};
 
 static pthread_t read_thread;
 static int read_thread_return = -1;
 
 int main(int argc, char **argv) {
     (void)(argc);
+    ic_style_def("error", "bold #CC3300");
 
     const char *program_name = *argv++;
     if (program_name == NULL) {
-        fprintf(stderr,
-                "Unexpected error, program_name is NULL!\n" USAGE_STR "\n");
+        ic_println(
+            "[error]Unexpected error, program_name is NULL!\n[/]" USAGE_STR);
         return 1;
     }
 
     const char *subcommand = *argv++;
     if (subcommand == NULL) {
-        fprintf(stderr, "Please specify a subcommand!\n" USAGE_STR "\n");
+        ic_println("[error]Please specify a subcommand!\n[/]" USAGE_STR);
         return 1;
     }
 
@@ -42,20 +48,22 @@ int main(int argc, char **argv) {
     } else if (strncmp("server", subcommand, 6) == 0) {
         type = SZ_STATE_TYPE_SERVER;
     } else {
-        fprintf(stderr, "Unknown subcommand '%s'\n" USAGE_STR "\n", subcommand);
+        ic_printf("[error]Unknown subcommand '%s'\n[/]" USAGE_STR "\n",
+                  subcommand);
         return 1;
     }
 
     const char *hostname = *argv++;
     if (hostname == NULL) {
-        fprintf(stderr, "Please specify a hostname!\n" USAGE_STR "\n");
+        ic_println("[error]Please specify a hostname!\n[/]" USAGE_STR);
         return 1;
     }
 
     struct sockaddr_in addr = {0};
     addr.sin_family = AF_INET;
     if (inet_pton(AF_INET, hostname, &addr.sin_addr) != 1) {
-        fprintf(stderr, "Invalid hostname! (%s)\n" USAGE_STR "\n", hostname);
+        ic_printf("[error]Invalid hostname! (%s)\n[/]" USAGE_STR "\n",
+                  hostname);
         return 1;
     }
 
@@ -65,8 +73,8 @@ int main(int argc, char **argv) {
         char *end;
         port = strtol(port_str, &end, 10);
         if (*end != '\0') {
-            fprintf(stderr, "Invalid port '%s': %s!\n" USAGE_STR "\n", port_str,
-                    strerror(errno));
+            ic_printf("[error]Invalid port '%s': %s!\n[/]" USAGE_STR "\n",
+                      port_str, strerror(errno));
             return 1;
         }
     }
@@ -74,28 +82,28 @@ int main(int argc, char **argv) {
 
     state = sz_init(type);
     if (state == NULL) {
-        fprintf(stderr, "Failed to initialize state!\n");
+        ic_println("[error]Failed to initialize state!\n");
         return 1;
     }
 
     int socket_fd = socket(AF_INET, SOCK_STREAM, 0);
     if (socket_fd == -1) {
-        fprintf(stderr, "Failed to create socket: %s\n", strerror(errno));
+        ic_printf("[error]Failed to create socket: %s\n", strerror(errno));
         return 1;
     }
 
     switch (type) {
     case SZ_STATE_TYPE_CLIENT: {
         if (connect(socket_fd, (struct sockaddr *)&addr, sizeof(addr)) == -1) {
-            fprintf(stderr, "Failed to connect to server: %s\n",
-                    strerror(errno));
+            ic_printf("[error]Failed to connect to server: %s\n",
+                      strerror(errno));
             return 1;
         }
 
         // will be free'd inside of the thread
         int *p_socket_fd = (int *)malloc(sizeof(int));
         if (p_socket_fd == NULL) {
-            fprintf(stderr, "Failed to allocate memory for p_socket_fd!\n");
+            ic_println("[error]Failed to allocate memory for p_socket_fd!\n");
             return 1;
         }
         *p_socket_fd = socket_fd;
@@ -106,10 +114,11 @@ int main(int argc, char **argv) {
         }
 
         ic_set_history(NULL, -1);
+        ic_set_default_completer(&ic_completer, NULL);
 
         char *input;
         char msg[SZ_TEXT_SIZE];
-        while ((input = ic_readline("schwatz")) != NULL) {
+        while ((input = ic_readline("")) != NULL) {
             size_t input_len = strnlen(input, SZ_TEXT_SIZE - 2);
             strncpy(msg, input, input_len);
 
@@ -120,10 +129,18 @@ int main(int argc, char **argv) {
             if (read_thread_return != -1)
                 return 1;
 
-            if (strstr(msg, "/cmd") != NULL) {
-                fprintf(stderr, "Failed to send message: Message should not "
-                                "contain '/cmd'\n");
+            if (strstr(msg, "#help")) {
+                ic_printf("[b]You are connected to %s:%d[/b]\nStart typing to "
+                          "send messages to all users.\n",
+                          hostname, port);
+                ic_history_add(input);
                 continue;
+            } else if (strstr(msg, "#exit")) {
+                free(input);
+                pthread_detach(read_thread);
+                close(socket_fd);
+                sz_destroy(state);
+                return 0;
             }
 
             sz_command cmd = {.id = SZ_CLIENT_COMMAND_MESSAGE};
@@ -139,20 +156,20 @@ int main(int argc, char **argv) {
     } break;
     case SZ_STATE_TYPE_SERVER: {
         if (bind(socket_fd, (struct sockaddr *)&addr, sizeof(addr)) == -1) {
-            fprintf(stderr, "Could not bind socket: %s\n", strerror(errno));
+            ic_printf("[error]Could not bind socket: %s\n", strerror(errno));
             close(socket_fd);
             return 1;
         }
 
         if (listen(socket_fd, 32) == -1) {
-            fprintf(stderr, "Could not listen on socket: %s\n",
-                    strerror(errno));
+            ic_printf("[error]Could not listen on socket: %s\n",
+                      strerror(errno));
             close(socket_fd);
             return 1;
         }
 
         char *s = inet_ntoa(addr.sin_addr);
-        printf("Running schwatz-server on %s:%i!\n", s, port);
+        ic_printf("[b]Running schwatz-server on %s:%d!\n", s, port);
 
         struct sockaddr_in client_addr;
         size_t client_addr_size = sizeof(struct sockaddr_in);
@@ -160,14 +177,14 @@ int main(int argc, char **argv) {
             int client_fd = accept(socket_fd, (struct sockaddr *)&client_addr,
                                    (socklen_t *)&client_addr_size);
             if (client_fd == -1) {
-                fprintf(stderr, "Could not accept client: %s\n",
-                        strerror(errno));
+                ic_printf("[error]Could not accept client: %s\n",
+                          strerror(errno));
                 continue;
             }
 
             size_t client_id = sz_push_client(state, client_fd, client_addr);
             if (client_id == SIZE_MAX) {
-                fprintf(stderr, "Could not accept client: internal error\n");
+                ic_println("[error]Could not accept client: internal error\n");
                 return 1;
             }
 
@@ -175,7 +192,8 @@ int main(int argc, char **argv) {
             // will be free'd inside of the thread
             size_t *p_client_id = (size_t *)malloc(sizeof(size_t));
             if (p_client_id == NULL) {
-                fprintf(stderr, "Failed to allocate memory for p_client_id!\n");
+                ic_println(
+                    "[error]Failed to allocate memory for p_client_id!\n");
                 return 1;
             }
             *p_client_id = client_id;
@@ -189,14 +207,22 @@ int main(int argc, char **argv) {
     return 0;
 }
 
-void *client_read_server(void *ptr) {
+static void ic_word_completer(ic_completion_env_t *cenv, const char *word) {
+    ic_add_completions(cenv, word, completions);
+}
+
+static void ic_completer(ic_completion_env_t *cenv, const char *input) {
+    ic_complete_word(cenv, input, &ic_word_completer, NULL);
+}
+
+static void *client_read_server(void *ptr) {
     int socket_fd = *((int *)ptr);
     free(ptr);
 
     while (1) {
         sz_command *cmd = calloc(1, sizeof(sz_command));
         if (cmd == NULL) {
-            fprintf(stderr, "Failed to allocate memory for server_msg!\n");
+            ic_println("[error]Failed to allocate memory for server_msg!\n");
             read_thread_return = 1;
             return NULL;
         }
@@ -208,21 +234,21 @@ void *client_read_server(void *ptr) {
 
         switch (cmd->id) {
         case SZ_SERVER_COMMAND_ERROR: {
-            fprintf(stderr, "Server error: %s\n", cmd->message);
+            ic_printf("[error]Server error: %s\n", cmd->message);
             free(cmd);
             read_thread_return = 1;
             return NULL;
         } break;
         case SZ_SERVER_COMMAND_ENCRYPTION_HANDSHAKE: {
-            fprintf(stderr, "server_public_key:\n %s\n",
-                    sz__hex_str((unsigned char *)cmd->message,
-                                crypto_box_PUBLICKEYBYTES));
+            ic_printf("server_public_key:\n %s\n",
+                      sz__hex_str((unsigned char *)cmd->message,
+                                  crypto_box_PUBLICKEYBYTES));
             memcpy(state->server_public_key, cmd->message,
                    crypto_box_PUBLICKEYBYTES);
             state->encrypted = true;
         } break;
         case SZ_SERVER_COMMAND_MESSAGE: {
-            printf("%s", cmd->message);
+            ic_printf("%s[/]", cmd->message);
         } break;
         default: {
             fprintf(stderr,
@@ -240,14 +266,14 @@ void *client_read_server(void *ptr) {
     return NULL;
 }
 
-void *server_handle_client(void *ptr) {
+static void *server_handle_client(void *ptr) {
     size_t client_id = *((size_t *)ptr);
     free(ptr);
     sz_client client = state->clients[client_id];
 
     sz_command *cmd = malloc(sizeof(sz_command));
     if (cmd == NULL) {
-        fprintf(stderr, "Could not create buffer for message\n");
+        ic_println("[error]Could not create buffer for message\n");
         close(client.fd);
         return NULL;
     }
@@ -258,7 +284,7 @@ void *server_handle_client(void *ptr) {
 
         switch (cmd->id) {
         case SZ_CLIENT_COMMAND_ERROR: {
-            fprintf(stderr, "Client error: %s\n", cmd->message);
+            ic_printf("[error]Client error: %s\n", cmd->message);
             failed = 1;
         } break;
         case SZ_CLIENT_COMMAND_ENCRYPTION_HANDSHAKE: {
@@ -271,7 +297,7 @@ void *server_handle_client(void *ptr) {
             }
         } break;
         case SZ_CLIENT_COMMAND_MESSAGE: {
-            printf("%s: %s", s, (char *)cmd);
+            ic_printf("[b]%s[/b]: %s[/]", s, (char *)cmd);
             for (size_t i = 0; i < state->clients_size; i++) {
                 if (i != client_id) {
                     char *temp = calloc(SZ_TEXT_SIZE, sizeof(char));
@@ -280,7 +306,8 @@ void *server_handle_client(void *ptr) {
                                 "Could not create buffer for message\n");
                         continue;
                     }
-                    snprintf(temp, SZ_TEXT_SIZE, "%s: %s", s, (char *)cmd);
+                    snprintf(temp, SZ_TEXT_SIZE, "[b]%s[/b]: %s[/]", s,
+                             (char *)cmd);
 
                     sz_command cmd = {.id = SZ_SERVER_COMMAND_MESSAGE};
                     memcpy(cmd.message, temp, SZ_TEXT_SIZE);
