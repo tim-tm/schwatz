@@ -15,9 +15,10 @@
 void *client_read_server(void *ptr);
 void *server_handle_client(void *ptr);
 
+static sz_state *state;
+
 static pthread_t read_thread;
 static int read_thread_return = -1;
-static sz_state *state;
 
 int main(int argc, char **argv) {
     (void)(argc);
@@ -107,9 +108,9 @@ int main(int argc, char **argv) {
         ic_set_history(NULL, -1);
 
         char *input;
-        char msg[SZ_MESSAGE_SIZE];
+        char msg[SZ_TEXT_SIZE];
         while ((input = ic_readline("schwatz")) != NULL) {
-            size_t input_len = strnlen(input, SZ_MESSAGE_SIZE - 2);
+            size_t input_len = strnlen(input, SZ_TEXT_SIZE - 2);
             strncpy(msg, input, input_len);
 
             // needed to flush the pending message
@@ -125,9 +126,13 @@ int main(int argc, char **argv) {
                 continue;
             }
 
-            if (!sz_send_message(state, socket_fd, msg)) {
+            sz_command cmd = {.id = SZ_CLIENT_COMMAND_MESSAGE};
+            memcpy(cmd.message, msg, SZ_TEXT_SIZE);
+            if (!sz_send_command(state, socket_fd, cmd)) {
                 return 1;
             }
+
+            ic_history_add(input);
             free(input);
         }
         pthread_detach(read_thread);
@@ -189,101 +194,47 @@ void *client_read_server(void *ptr) {
     free(ptr);
 
     while (1) {
-        char *server_msg = calloc(SZ_MESSAGE_SIZE, sizeof(char));
-        if (server_msg == NULL) {
+        sz_command *cmd = calloc(1, sizeof(sz_command));
+        if (cmd == NULL) {
             fprintf(stderr, "Failed to allocate memory for server_msg!\n");
             read_thread_return = 1;
             return NULL;
         }
 
-        if (!sz_read_message(state, socket_fd, server_msg)) {
+        if (!sz_read_command(state, socket_fd, cmd)) {
             read_thread_return = 1;
             return NULL;
         }
 
-        char *cmd_start;
-        if ((cmd_start = strstr(server_msg, "/cmd")) != NULL) {
-            // a command is structured like this: "/cmd <id> <message>"
-            // This code splits the string by " " to store the id and message
-            char *server_msg_copy = calloc(SZ_MESSAGE_SIZE, sizeof(char));
-            if (server_msg_copy == NULL) {
-                fprintf(stderr,
-                        "Failed to allocate memory for server_msg_copy!\n");
-                read_thread_return = 1;
-                return NULL;
-            }
-            strncpy(server_msg_copy, server_msg, SZ_MESSAGE_SIZE);
-
-            // extract the id
-            // commands[0] = "/cmd"
-            // commands[1] = "<id>"
-            void *commands[3] = {0};
-            char *split = strtok(cmd_start, " ");
-            for (size_t i = 0; i < 2 && split != NULL; ++i) {
-                commands[i] = split;
-                split = strtok(NULL, " ");
-            }
-
-            if (split != NULL) {
-                // extract the full message
-                // commands[2] = "<message>"
-                void *msg_start = strstr(server_msg_copy, split);
-                if (msg_start != NULL) {
-                    commands[2] = msg_start;
-                }
-            }
-
-            // turn the id into an integer value
-            // use an enum to properly switch on the value
-            char *end;
-            enum sz_server_command command = strtol(commands[1], &end, 10);
-            if (*end != '\0') {
-                fprintf(stderr,
-                        "Invalid server command! (%s)\nThe server could run on "
-                        "a different version!\n",
-                        (char *)commands[1]);
-                free(server_msg_copy);
-                free(server_msg);
-                read_thread_return = 1;
-                return NULL;
-            }
-
-            switch (command) {
-            case SZ_SERVER_COMMAND_ERROR: {
-                fprintf(stderr, "Server error: %s\n", (char *)commands[2]);
-                free(server_msg_copy);
-                free(server_msg);
-                read_thread_return = 1;
-                return NULL;
-            } break;
-            case SZ_SERVER_COMMAND_ENCRYPTION_HANDSHAKE: {
-                if (commands[2] == NULL) {
-                    fprintf(stderr, "Server returned invalid public key!\n");
-                    return NULL;
-                }
-                fprintf(stderr, "server_public_key:\n %s\n",
-                        sz__hex_str(commands[2], crypto_box_PUBLICKEYBYTES));
-                memcpy(state->server_public_key, commands[2],
-                       crypto_box_PUBLICKEYBYTES);
-                state->encrypted = true;
-            } break;
-            default: {
-                fprintf(stderr,
-                        "Invalid server command! (%s)\nThe server could run on "
-                        "a different version!\n",
-                        (char *)commands[1]);
-                free(server_msg_copy);
-                free(server_msg);
-                read_thread_return = 1;
-                return NULL;
-            } break;
-            }
-            free(server_msg_copy);
-            free(server_msg);
-            continue;
+        switch (cmd->id) {
+        case SZ_SERVER_COMMAND_ERROR: {
+            fprintf(stderr, "Server error: %s\n", cmd->message);
+            free(cmd);
+            read_thread_return = 1;
+            return NULL;
+        } break;
+        case SZ_SERVER_COMMAND_ENCRYPTION_HANDSHAKE: {
+            fprintf(stderr, "server_public_key:\n %s\n",
+                    sz__hex_str((unsigned char *)cmd->message,
+                                crypto_box_PUBLICKEYBYTES));
+            memcpy(state->server_public_key, cmd->message,
+                   crypto_box_PUBLICKEYBYTES);
+            state->encrypted = true;
+        } break;
+        case SZ_SERVER_COMMAND_MESSAGE: {
+            printf("%s", cmd->message);
+        } break;
+        default: {
+            fprintf(stderr,
+                    "Invalid server command! (%d)\nThe server could run on "
+                    "a different version!\n",
+                    cmd->id);
+            free(cmd);
+            read_thread_return = 1;
+            return NULL;
+        } break;
         }
-        printf("%s", (char *)server_msg);
-        free(server_msg);
+        free(cmd);
     }
     read_thread_return = 0;
     return NULL;
@@ -294,104 +245,61 @@ void *server_handle_client(void *ptr) {
     free(ptr);
     sz_client client = state->clients[client_id];
 
-    void *buf = malloc(SZ_MESSAGE_SIZE);
-    if (buf == NULL) {
+    sz_command *cmd = malloc(sizeof(sz_command));
+    if (cmd == NULL) {
         fprintf(stderr, "Could not create buffer for message\n");
         close(client.fd);
         return NULL;
     }
 
     int failed = 0;
-    while (sz_read_message(state, client_id, buf) && !failed) {
+    while (sz_read_command(state, client_id, cmd) && !failed) {
         char *s = inet_ntoa(client.addr.sin_addr);
 
-        char *cmd_start;
-        if ((cmd_start = strstr(buf, "/cmd")) != NULL) {
-            // a command is structured like this: "/cmd <id> <message>"
-            // This code splits the string by " " to store the id and message
-            char *buf_copy = calloc(SZ_MESSAGE_SIZE, sizeof(char));
-            if (buf_copy == NULL) {
-                fprintf(stderr, "Failed to allocate memory for buf_copy!\n");
+        switch (cmd->id) {
+        case SZ_CLIENT_COMMAND_ERROR: {
+            fprintf(stderr, "Client error: %s\n", cmd->message);
+            failed = 1;
+        } break;
+        case SZ_CLIENT_COMMAND_ENCRYPTION_HANDSHAKE: {
+            if (!sz_handshake(state, client_id,
+                              (unsigned char *)cmd->message)) {
+                sz_command cmd = {.id = SZ_SERVER_COMMAND_ERROR,
+                                  .message = "Failed to generate keys!"};
+                sz_send_command(state, client_id, cmd);
                 failed = 1;
             }
-            strncpy(buf_copy, buf, SZ_MESSAGE_SIZE);
+        } break;
+        case SZ_CLIENT_COMMAND_MESSAGE: {
+            printf("%s: %s", s, (char *)cmd);
+            for (size_t i = 0; i < state->clients_size; i++) {
+                if (i != client_id) {
+                    char *temp = calloc(SZ_TEXT_SIZE, sizeof(char));
+                    if (temp == NULL) {
+                        fprintf(stderr,
+                                "Could not create buffer for message\n");
+                        continue;
+                    }
+                    snprintf(temp, SZ_TEXT_SIZE, "%s: %s", s, (char *)cmd);
 
-            // extract the id
-            // commands[0] = "/cmd"
-            // commands[1] = "<id>"
-            void *commands[3] = {0};
-            char *split = strtok(cmd_start, " ");
-            for (size_t i = 0; i < 2 && split != NULL; ++i) {
-                commands[i] = split;
-                split = strtok(NULL, " ");
-            }
-
-            if (split != NULL) {
-                // extract the full message
-                // commands[2] = "<message>"
-                void *msg_start = strstr(buf_copy, split);
-                if (msg_start != NULL) {
-                    commands[2] = msg_start;
+                    sz_command cmd = {.id = SZ_SERVER_COMMAND_MESSAGE};
+                    memcpy(cmd.message, temp, SZ_TEXT_SIZE);
+                    sz_send_command(state, i, cmd);
+                    free(temp);
                 }
             }
-
-            // turn the id into an integer value
-            // use an enum to properly switch on the value
-            char *end;
-            enum sz_client_command command = strtol(commands[1], &end, 10);
-            if (*end != '\0') {
-                fprintf(stderr,
-                        "Invalid client command! (%s)\nThe client could run on "
-                        "a different version!\n",
-                        (char *)commands[1]);
-                free(buf_copy);
-                failed = 1;
-                continue;
-            }
-
-            switch (command) {
-            case SZ_CLIENT_COMMAND_ERROR: {
-                fprintf(stderr, "Client error: %s\n", (char *)commands[2]);
-                failed = 1;
-            } break;
-            case SZ_CLIENT_COMMAND_ENCRYPTION_HANDSHAKE: {
-                if (!sz_handshake(state, client_id,
-                                  (unsigned char *)commands[2])) {
-                    sz_send_command(state, client_id, SZ_SERVER_COMMAND_ERROR,
-                                    "Failed to generate keys!");
-                    failed = 1;
-                }
-            } break;
-            default: {
-                fprintf(stderr,
-                        "Invalid client command! (%s)\nThe client could run on "
-                        "a different version!\n",
-                        (char *)commands[1]);
-                failed = 1;
-            } break;
-            }
-            free(buf_copy);
-            memset(buf, 0, SZ_MESSAGE_SIZE);
-            continue;
+        } break;
+        default: {
+            fprintf(stderr,
+                    "Invalid client command! (%d)\nThe client could run on "
+                    "a different version!\n",
+                    cmd->id);
+            failed = 1;
+        } break;
         }
-
-        printf("%s: %s", s, (char *)buf);
-        for (size_t i = 0; i < state->clients_size; i++) {
-            if (i != client_id) {
-                char *temp = calloc(SZ_MESSAGE_SIZE, sizeof(char));
-                if (temp == NULL) {
-                    fprintf(stderr, "Could not create buffer for message\n");
-                    continue;
-                }
-                snprintf(temp, SZ_MESSAGE_SIZE, "%s: %s", s, (char *)buf);
-                sz_send_message(state, i, temp);
-                free(temp);
-            }
-        }
-        memset(buf, 0, SZ_MESSAGE_SIZE);
     }
     close(client.fd);
-    free(buf);
-    // free(client);
+    free(cmd);
+    sz_rm_client(state, client_id);
     return NULL;
 }

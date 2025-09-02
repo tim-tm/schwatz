@@ -4,28 +4,31 @@
 #include <stddef.h>
 #include <sys/socket.h>
 
-#define SZ_MESSAGE_SIZE 256
-#define SZ_SERVER_ENCRYPTED_MESSAGE_SIZE                                       \
-    (crypto_box_MACBYTES + crypto_box_NONCEBYTES + SZ_MESSAGE_SIZE)
-#define SZ_SERVER_CIPHER_MESSAGE_SIZE (crypto_box_MACBYTES + SZ_MESSAGE_SIZE)
-#define SZ_CLIENT_ENCRYPTED_MESSAGE_SIZE                                       \
-    (crypto_box_MACBYTES + crypto_box_NONCEBYTES + SZ_MESSAGE_SIZE)
-#define SZ_CLIENT_CIPHER_MESSAGE_SIZE (crypto_box_MACBYTES + SZ_MESSAGE_SIZE)
+#define SZ_TEXT_SIZE 256
+#define SZ_MAC_NONCE_BYTES (crypto_box_MACBYTES + crypto_box_NONCEBYTES)
+#define SZ_MAC_BYTES (crypto_box_MACBYTES)
 
 enum sz_client_command {
-    SZ_CLIENT_COMMAND_ERROR = -1,
-    SZ_CLIENT_COMMAND_ENCRYPTION_HANDSHAKE = 1
+    SZ_CLIENT_COMMAND_ERROR,
+    SZ_CLIENT_COMMAND_ENCRYPTION_HANDSHAKE,
+    SZ_CLIENT_COMMAND_MESSAGE,
 };
 
 enum sz_server_command {
-    SZ_SERVER_COMMAND_ERROR = -1,
-    SZ_SERVER_COMMAND_ENCRYPTION_HANDSHAKE = 1
+    SZ_SERVER_COMMAND_ERROR,
+    SZ_SERVER_COMMAND_ENCRYPTION_HANDSHAKE,
+    SZ_SERVER_COMMAND_MESSAGE,
 };
 
 enum sz_state_type {
     SZ_STATE_TYPE_SERVER,
     SZ_STATE_TYPE_CLIENT,
 };
+
+typedef struct sz_command {
+    char id;
+    char message[SZ_TEXT_SIZE];
+} sz_command;
 
 typedef struct sz_client {
     int fd;
@@ -52,12 +55,15 @@ typedef struct sz_state {
 } sz_state;
 
 const char *sz__hex_str(unsigned char *data, size_t data_len);
+bool sz__read_value(sz_state *state, int target, void *buf, size_t buf_name);
+bool sz__send_value(sz_state *state, int target, void *content,
+                    size_t content_size);
 
 sz_state *sz_init(enum sz_state_type type);
 void sz_destroy(sz_state *state);
 
+bool sz_rm_client(sz_state *state, size_t client_id);
 size_t sz_push_client(sz_state *state, int fd, struct sockaddr_in addr);
-bool sz_read_message(sz_state *state, int target, void *buffer);
-bool sz_send_message(sz_state *state, int target, const char *msg);
-bool sz_send_command(sz_state *state, int target, int cmd, const char *msg);
+bool sz_read_command(sz_state *state, int target, sz_command *cmd);
+bool sz_send_command(sz_state *state, int target, sz_command cmd);
 bool sz_handshake(sz_state *state, int target, unsigned char *public_key);

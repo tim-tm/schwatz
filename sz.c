@@ -13,6 +13,241 @@ const char *sz__hex_str(unsigned char *data, size_t data_len) {
     return sz__hex_str_result;
 }
 
+bool sz__read_value(sz_state *state, int target, void *buf, size_t buf_size) {
+    if (state == NULL || buf == NULL) {
+        fprintf(stderr, "sz__read_value: invalid input\n");
+        return false;
+    }
+
+    if (buf_size == 0) {
+        printf("sz__read_value: buf_size=0, nothing to read\n");
+        return true;
+    }
+
+    size_t total_msg_size = SZ_MAC_NONCE_BYTES + buf_size;
+    size_t cipher_msg_size = SZ_MAC_BYTES + buf_size;
+
+    ssize_t result;
+    switch (state->type) {
+    case SZ_STATE_TYPE_CLIENT: {
+        if (state->encrypted) {
+            unsigned char server_msg[total_msg_size];
+            result = recv(target, server_msg, total_msg_size, 0);
+            if (result == 0) {
+                printf("sz__read_value: Server socket shutdown\n");
+                return false;
+            } else if (result == -1) {
+                fprintf(stderr, "sz__read_value: %s\n", strerror(errno));
+                return false;
+            } else if ((size_t)result != total_msg_size) {
+                fprintf(stderr,
+                        "sz__read_value: couldn't recv all bytes from server. "
+                        "want: %zu, got: %zu\n",
+                        total_msg_size, result);
+                return false;
+            }
+
+            unsigned char cipher_msg[cipher_msg_size];
+            memcpy(cipher_msg, server_msg, cipher_msg_size);
+
+            unsigned char nonce[crypto_box_NONCEBYTES];
+            memcpy(nonce, server_msg + cipher_msg_size, crypto_box_NONCEBYTES);
+
+            unsigned char decrypted[buf_size];
+            if (crypto_box_open_easy(decrypted, cipher_msg, cipher_msg_size,
+                                     nonce, state->server_public_key,
+                                     state->secret_key) != 0) {
+                fprintf(
+                    stderr,
+                    "sz__read_value: Failed to decrypt message from server\n");
+                return false;
+            }
+            memcpy(buf, decrypted, buf_size);
+        } else {
+            result = recv(target, buf, buf_size, 0);
+            if (result == 0) {
+                printf("sz__read_value: Server socket shutdown\n");
+                return false;
+            } else if (result == -1) {
+                fprintf(stderr, "sz__read_value: %s\n", strerror(errno));
+                return false;
+            } else if ((size_t)result != buf_size) {
+                fprintf(stderr,
+                        "sz__read_value: couldn't recv all bytes from server. "
+                        "want: %zu, got: %zu\n",
+                        buf_size, result);
+                return false;
+            }
+        }
+    } break;
+    case SZ_STATE_TYPE_SERVER: {
+        // its relatively safe to cast int to size_t
+        // because negative values of 'target' are
+        // being checked before
+        if (target < 0 || (size_t)target >= state->clients_size) {
+            fprintf(stderr,
+                    "sz__read_value: invalid input, client not found\n");
+            return false;
+        }
+        sz_client client = state->clients[target];
+
+        if (client.encrypted) {
+            unsigned char client_msg[total_msg_size];
+            result = recv(client.fd, client_msg, total_msg_size, 0);
+            if (result == 0) {
+                printf("sz__read_value: Client socket shutdown\n");
+                return false;
+            } else if (result == -1) {
+                fprintf(stderr, "sz__read_value: %s\n", strerror(errno));
+                return false;
+            } else if ((size_t)result != total_msg_size) {
+                fprintf(stderr,
+                        "sz__read_value: couldn't recv all bytes from client. "
+                        "want: %zu, got: %zu\n",
+                        total_msg_size, result);
+                return false;
+            }
+
+            unsigned char cipher_msg[cipher_msg_size];
+            memcpy(cipher_msg, client_msg, cipher_msg_size);
+
+            unsigned char nonce[crypto_box_NONCEBYTES];
+            memcpy(nonce, client_msg + cipher_msg_size, crypto_box_NONCEBYTES);
+
+            unsigned char decrypted[buf_size];
+            if (crypto_box_open_easy(decrypted, cipher_msg, cipher_msg_size,
+                                     nonce, client.public_key,
+                                     state->secret_key) != 0) {
+                fprintf(
+                    stderr,
+                    "sz__read_value: Failed to decrypt message from client\n");
+                return false;
+            }
+            memcpy(buf, decrypted, buf_size);
+        } else {
+            result = recv(client.fd, buf, buf_size, 0);
+            if (result == 0) {
+                printf("sz__read_value: Client socket shutdown\n");
+                return false;
+            } else if (result == -1) {
+                fprintf(
+                    stderr,
+                    "sz__read_value: Failed to recv message from client: %s\n",
+                    strerror(errno));
+                return false;
+            } else if ((size_t)result != buf_size) {
+                fprintf(stderr,
+                        "sz__read_value: couldn't recv all bytes from client. "
+                        "want: %zu, got: %zu\n",
+                        buf_size, result);
+                return false;
+            }
+        }
+    } break;
+    }
+
+    return true;
+}
+
+bool sz__send_value(sz_state *state, int target, void *content,
+                    size_t content_size) {
+    if (state == NULL || content == NULL) {
+        fprintf(stderr, "sz__send_value: invalid input\n");
+        return false;
+    }
+
+    size_t total_msg_size = SZ_MAC_NONCE_BYTES + content_size;
+    size_t cipher_msg_size = SZ_MAC_BYTES + content_size;
+
+    int fd;
+    void *buf;
+    size_t buf_size;
+    switch (state->type) {
+    case SZ_STATE_TYPE_CLIENT: {
+        fd = target;
+
+        if (state->encrypted) {
+            unsigned char nonce[crypto_box_NONCEBYTES];
+            unsigned char cipher_text[cipher_msg_size];
+            // sent_content: "cipher_text"+"nonce"
+            unsigned char sent_content[total_msg_size];
+
+            randombytes_buf(nonce, sizeof(nonce));
+            if (crypto_box_easy(cipher_text, content, content_size, nonce,
+                                state->server_public_key,
+                                state->secret_key) != 0) {
+                fprintf(stderr, "sz__send_value: Failed to encrypt message\n");
+                return false;
+            }
+
+            memcpy(sent_content, cipher_text, cipher_msg_size);
+            memcpy(sent_content + cipher_msg_size, nonce,
+                   crypto_box_NONCEBYTES);
+
+            buf = sent_content;
+            buf_size = total_msg_size;
+        } else {
+            buf = content;
+            buf_size = content_size;
+        }
+    } break;
+    case SZ_STATE_TYPE_SERVER: {
+        // its relatively safe to cast int to size_t
+        // because negative values of 'target' are
+        // being checked before
+        if (target < 0 || (size_t)target >= state->clients_size) {
+            fprintf(stderr,
+                    "sz__send_value: invalid input, client not found\n");
+            return false;
+        }
+        sz_client client = state->clients[target];
+        fd = client.fd;
+
+        if (client.encrypted) {
+            unsigned char nonce[crypto_box_NONCEBYTES];
+            unsigned char cipher_text[cipher_msg_size];
+            // sent_content: "cipher_text"+"nonce"
+            unsigned char sent_content[total_msg_size];
+
+            randombytes_buf(nonce, sizeof(nonce));
+            if (crypto_box_easy(cipher_text, content, content_size, nonce,
+                                client.public_key, state->secret_key) != 0) {
+                fprintf(stderr, "sz__send_value: Failed to encrypt message\n");
+                return false;
+            }
+
+            memcpy(sent_content, cipher_text, cipher_msg_size);
+            memcpy(sent_content + cipher_msg_size, nonce,
+                   crypto_box_NONCEBYTES);
+
+            buf = sent_content;
+            buf_size = total_msg_size;
+        } else {
+            buf = content;
+            buf_size = content_size;
+        }
+    } break;
+    default: {
+        fprintf(stderr, "sz__send_value: unknown state type with id '%d'\n",
+                state->type);
+        return false;
+    } break;
+    }
+
+    ssize_t result = send(fd, buf, buf_size, 0);
+    if (result == -1) {
+        fprintf(stderr, "sz__send_value: %s\n", strerror(errno));
+        return false;
+    } else if ((size_t)result != buf_size) {
+        fprintf(stderr,
+                "sz__send_value: could not send all bytes. "
+                "want: %zu, sent: %zu\n",
+                buf_size, result);
+        return false;
+    }
+    return true;
+}
+
 sz_state *sz_init(enum sz_state_type type) {
     if (sodium_init() != 0) {
         fprintf(stderr, "sz_init: Failed to init sodium!\n");
@@ -48,8 +283,28 @@ void sz_destroy(sz_state *state) {
     free(state);
 }
 
+bool sz_rm_client(sz_state *state, size_t client_id) {
+    if (state == NULL || state->type != SZ_STATE_TYPE_SERVER) {
+        fprintf(stderr, "sz_rm_client: invalid input\n");
+        return false;
+    }
+
+    if (client_id >= state->clients_size) {
+        fprintf(stderr, "sz_rm_client: invalid client_id '%zu'\n", client_id);
+        return false;
+    }
+
+    for (size_t i = client_id + 1; i < state->clients_size; i++) {
+        sz_client tmp = state->clients[i - 1];
+        state->clients[i - 1] = state->clients[i];
+        state->clients[i] = tmp;
+    }
+    state->clients_size--;
+    return true;
+}
+
 size_t sz_push_client(sz_state *state, int fd, struct sockaddr_in addr) {
-    if (state == NULL || fd == -1) {
+    if (state == NULL || state->type != SZ_STATE_TYPE_SERVER || fd == -1) {
         fprintf(stderr, "sz_push_client: invalid input\n");
         return SIZE_MAX;
     }
@@ -65,268 +320,37 @@ size_t sz_push_client(sz_state *state, int fd, struct sockaddr_in addr) {
     return state->clients_size - 1;
 }
 
-bool sz_read_message(sz_state *state, int target, void *buffer) {
-    if (state == NULL || buffer == NULL) {
-        fprintf(stderr, "sz_read_message: invalid input\n");
+bool sz_read_command(sz_state *state, int target, sz_command *cmd) {
+    if (state == NULL || cmd == NULL) {
+        fprintf(stderr, "sz_read_command: invalid input\n");
         return false;
     }
 
-    ssize_t result;
-    switch (state->type) {
-    case SZ_STATE_TYPE_CLIENT: {
-        if (state->encrypted) {
-            unsigned char server_msg[SZ_SERVER_ENCRYPTED_MESSAGE_SIZE];
-            result =
-                recv(target, server_msg, SZ_SERVER_ENCRYPTED_MESSAGE_SIZE, 0);
-            if (result == 0) {
-                printf("sz_read_message: Server socket shutdown\n");
-                return false;
-            } else if (result == -1) {
-                fprintf(stderr, "sz_read_message: %s\n", strerror(errno));
-                return false;
-            } else if (result != SZ_SERVER_ENCRYPTED_MESSAGE_SIZE) {
-                fprintf(stderr,
-                        "sz_read_message: couldn't recv all bytes from server. "
-                        "want: %d, got: %zu\n",
-                        SZ_SERVER_ENCRYPTED_MESSAGE_SIZE, result);
-                return false;
-            }
-
-            unsigned char cipher_msg[SZ_SERVER_CIPHER_MESSAGE_SIZE];
-            memcpy(cipher_msg, server_msg, SZ_SERVER_CIPHER_MESSAGE_SIZE);
-
-            unsigned char nonce[crypto_box_NONCEBYTES];
-            memcpy(nonce, server_msg + SZ_SERVER_CIPHER_MESSAGE_SIZE,
-                   crypto_box_NONCEBYTES);
-
-            unsigned char decrypted[SZ_MESSAGE_SIZE];
-            if (crypto_box_open_easy(
-                    decrypted, cipher_msg, SZ_SERVER_CIPHER_MESSAGE_SIZE, nonce,
-                    state->server_public_key, state->secret_key) != 0) {
-                fprintf(
-                    stderr,
-                    "sz_read_message: Failed to decrypt message from server\n");
-                return false;
-            }
-            memcpy(buffer, decrypted, SZ_MESSAGE_SIZE);
-        } else {
-            result = recv(target, buffer, SZ_MESSAGE_SIZE, 0);
-            if (result == 0) {
-                printf("sz_read_message: Server socket shutdown\n");
-                return false;
-            } else if (result == -1) {
-                fprintf(stderr, "sz_read_message: %s\n", strerror(errno));
-                return false;
-            } else if (result != SZ_MESSAGE_SIZE) {
-                fprintf(stderr,
-                        "sz_read_message: couldn't recv all bytes from server. "
-                        "want: %d, got: %zu\n",
-                        SZ_MESSAGE_SIZE, result);
-                return false;
-            }
-        }
-    } break;
-    case SZ_STATE_TYPE_SERVER: {
-        // its relatively safe to cast int to size_t
-        // because negative values of 'target' are
-        // being checked before
-        if (target < 0 || (size_t)target >= state->clients_size) {
-            fprintf(stderr,
-                    "sz_read_message: invalid input, client not found\n");
-            return false;
-        }
-        sz_client client = state->clients[target];
-
-        if (client.encrypted) {
-            unsigned char client_msg[SZ_CLIENT_ENCRYPTED_MESSAGE_SIZE];
-            result = recv(client.fd, client_msg,
-                          SZ_CLIENT_ENCRYPTED_MESSAGE_SIZE, 0);
-            if (result == 0) {
-                printf("sz_read_message: Client socket shutdown\n");
-                return false;
-            } else if (result == -1) {
-                fprintf(stderr, "sz_read_message: %s\n", strerror(errno));
-                return false;
-            } else if (result != SZ_CLIENT_ENCRYPTED_MESSAGE_SIZE) {
-                fprintf(stderr,
-                        "sz_read_message: couldn't recv all bytes from client. "
-                        "want: %d, got: %zu\n",
-                        SZ_CLIENT_ENCRYPTED_MESSAGE_SIZE, result);
-                return false;
-            }
-
-            unsigned char cipher_msg[SZ_CLIENT_CIPHER_MESSAGE_SIZE];
-            memcpy(cipher_msg, client_msg, SZ_CLIENT_CIPHER_MESSAGE_SIZE);
-
-            unsigned char nonce[crypto_box_NONCEBYTES];
-            memcpy(nonce, client_msg + SZ_CLIENT_CIPHER_MESSAGE_SIZE,
-                   crypto_box_NONCEBYTES);
-
-            unsigned char decrypted[SZ_MESSAGE_SIZE];
-            if (crypto_box_open_easy(
-                    decrypted, cipher_msg, SZ_CLIENT_CIPHER_MESSAGE_SIZE, nonce,
-                    client.public_key, state->secret_key) != 0) {
-                fprintf(
-                    stderr,
-                    "sz_read_message: Failed to decrypt message from client\n");
-                return false;
-            }
-            memcpy(buffer, decrypted, SZ_MESSAGE_SIZE);
-        } else {
-            result = recv(client.fd, buffer, SZ_MESSAGE_SIZE, 0);
-            if (result == 0) {
-                printf("sz_read_message: Client socket shutdown\n");
-                return false;
-            } else if (result == -1) {
-                fprintf(
-                    stderr,
-                    "sz_read_message: Failed to recv message from client: %s\n",
-                    strerror(errno));
-                return false;
-            } else if (result != SZ_MESSAGE_SIZE) {
-                fprintf(stderr,
-                        "sz_read_message: couldn't recv all bytes from client. "
-                        "want: %d, got: %zu\n",
-                        SZ_MESSAGE_SIZE, result);
-                return false;
-            }
-        }
-    } break;
-    }
-
-    return true;
-}
-
-bool sz_send_message(sz_state *state, int target, const char *msg) {
-    if (state == NULL || msg == NULL) {
-        fprintf(stderr, "sz_send_message: invalid input\n");
+    size_t id_size = sizeof(cmd->id);
+    char buf[SZ_TEXT_SIZE + 1];
+    if (!sz__read_value(state, target, buf, SZ_TEXT_SIZE + id_size)) {
         return false;
     }
 
-    switch (state->type) {
-    case SZ_STATE_TYPE_CLIENT: {
-        if (state->encrypted) {
-            unsigned char nonce[crypto_box_NONCEBYTES];
-            unsigned char cipher_text[SZ_CLIENT_CIPHER_MESSAGE_SIZE];
-            // sent_msg: "cipher_text"+"nonce"
-            unsigned char sent_msg[SZ_CLIENT_ENCRYPTED_MESSAGE_SIZE];
-
-            unsigned char uc_msg[SZ_MESSAGE_SIZE];
-            memcpy(uc_msg, msg, SZ_MESSAGE_SIZE);
-            randombytes_buf(nonce, sizeof(nonce));
-            if (crypto_box_easy(cipher_text, uc_msg, SZ_MESSAGE_SIZE, nonce,
-                                state->server_public_key,
-                                state->secret_key) != 0) {
-                fprintf(stderr, "sz_send_message: Failed to encrypt message\n");
-                return false;
-            }
-
-            memcpy(sent_msg, cipher_text, SZ_CLIENT_CIPHER_MESSAGE_SIZE);
-            memcpy(sent_msg + SZ_CLIENT_CIPHER_MESSAGE_SIZE, nonce,
-                   crypto_box_NONCEBYTES);
-
-            if (send(target, sent_msg, SZ_CLIENT_ENCRYPTED_MESSAGE_SIZE, 0) !=
-                SZ_CLIENT_ENCRYPTED_MESSAGE_SIZE) {
-                fprintf(stderr, "sz_send_message: %s\n", strerror(errno));
-                return false;
-            }
-        } else {
-            if (send(target, msg, SZ_MESSAGE_SIZE, 0) != SZ_MESSAGE_SIZE) {
-                fprintf(stderr, "sz_send_message: %s\n", strerror(errno));
-                return false;
-            }
-        }
-    } break;
-    case SZ_STATE_TYPE_SERVER: {
-        // its relatively safe to cast int to size_t
-        // because negative values of 'target' are
-        // being checked before
-        if (target < 0 || (size_t)target >= state->clients_size) {
-            fprintf(stderr,
-                    "sz_send_message: invalid input, client not found\n");
-            return false;
-        }
-        sz_client client = state->clients[target];
-
-        if (client.encrypted) {
-            unsigned char nonce[crypto_box_NONCEBYTES];
-            unsigned char cipher_text[SZ_SERVER_CIPHER_MESSAGE_SIZE];
-            // sent_msg: "cipher_text"+"nonce"
-            unsigned char sent_msg[SZ_SERVER_ENCRYPTED_MESSAGE_SIZE];
-
-            unsigned char uc_msg[SZ_MESSAGE_SIZE];
-            memcpy(uc_msg, msg, SZ_MESSAGE_SIZE);
-            randombytes_buf(nonce, sizeof(nonce));
-            if (crypto_box_easy(cipher_text, uc_msg, SZ_MESSAGE_SIZE, nonce,
-                                client.public_key, state->secret_key) != 0) {
-                fprintf(stderr, "sz_send_message: Failed to encrypt message\n");
-                return false;
-            }
-
-            memcpy(sent_msg, cipher_text, SZ_SERVER_CIPHER_MESSAGE_SIZE);
-            memcpy(sent_msg + SZ_SERVER_CIPHER_MESSAGE_SIZE, nonce,
-                   crypto_box_NONCEBYTES);
-
-            if (send(client.fd, sent_msg, SZ_SERVER_ENCRYPTED_MESSAGE_SIZE,
-                     0) == -1) {
-                fprintf(stderr, "sz_send_message: Failed to send message: %s\n",
-                        strerror(errno));
-                return false;
-            }
-        } else {
-            if (send(client.fd, msg, SZ_MESSAGE_SIZE, 0) == -1) {
-                fprintf(stderr, "sz_send_message: Failed to send message: %s\n",
-                        strerror(errno));
-                return false;
-            }
-        }
-    } break;
-    }
-
+    cmd->id = buf[0];
+    memcpy(cmd->message, buf + id_size, SZ_TEXT_SIZE);
     return true;
 }
 
-bool sz_send_command(sz_state *state, int target, int cmd, const char *msg) {
-    if (state == NULL || msg == NULL) {
+bool sz_send_command(sz_state *state, int target, sz_command cmd) {
+    if (state == NULL) {
         fprintf(stderr, "sz_send_command: invalid input\n");
         return false;
     }
 
-    char *sent_msg = calloc(SZ_MESSAGE_SIZE, sizeof(char));
-    if (sent_msg == NULL) {
-        fprintf(stderr,
-                "sz_send_command: Failed to allocate memory for message!\n");
+    size_t id_size = sizeof(cmd.id);
+    char buf[SZ_TEXT_SIZE + id_size];
+    buf[0] = cmd.id;
+    memcpy(buf + id_size, cmd.message, SZ_TEXT_SIZE);
+
+    if (!sz__send_value(state, target, buf, SZ_TEXT_SIZE + id_size)) {
         return false;
     }
-
-    snprintf(sent_msg, SZ_MESSAGE_SIZE, "/cmd %d %s", cmd, msg);
-
-    switch (state->type) {
-    case SZ_STATE_TYPE_CLIENT: {
-        if (!sz_send_message(state, target, sent_msg)) {
-            free(sent_msg);
-            return false;
-        }
-    } break;
-    case SZ_STATE_TYPE_SERVER: {
-        // its relatively safe to cast int to size_t
-        // because negative values of 'target' are
-        // being checked before
-        if (target < 0 || (size_t)target >= state->clients_size) {
-            fprintf(stderr,
-                    "sz_send_command: invalid input, client not found\n");
-            free(sent_msg);
-            return false;
-        }
-
-        if (!sz_send_message(state, target, sent_msg)) {
-            free(sent_msg);
-            return false;
-        }
-    } break;
-    }
-
-    free(sent_msg);
     return true;
 }
 
@@ -336,11 +360,12 @@ bool sz_handshake(sz_state *state, int target, unsigned char *public_key) {
         return false;
     }
 
+    sz_command cmd;
     switch (state->type) {
     case SZ_STATE_TYPE_CLIENT: {
-        if (!sz_send_command(state, target,
-                             SZ_CLIENT_COMMAND_ENCRYPTION_HANDSHAKE,
-                             (char *)state->public_key))
+        cmd = (sz_command){.id = SZ_CLIENT_COMMAND_ENCRYPTION_HANDSHAKE};
+        memcpy(cmd.message, state->public_key, crypto_box_PUBLICKEYBYTES);
+        if (!sz_send_command(state, target, cmd))
             return false;
     } break;
     case SZ_STATE_TYPE_SERVER: {
@@ -364,9 +389,9 @@ bool sz_handshake(sz_state *state, int target, unsigned char *public_key) {
         printf("client.public_key\n %s\n",
                sz__hex_str(client->public_key, crypto_box_PUBLICKEYBYTES));
 
-        if (!sz_send_command(state, target,
-                             SZ_SERVER_COMMAND_ENCRYPTION_HANDSHAKE,
-                             (char *)state->public_key))
+        cmd = (sz_command){.id = SZ_SERVER_COMMAND_ENCRYPTION_HANDSHAKE};
+        memcpy(cmd.message, state->public_key, crypto_box_PUBLICKEYBYTES);
+        if (!sz_send_command(state, target, cmd))
             return false;
 
         client->encrypted = true;
